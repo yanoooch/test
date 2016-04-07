@@ -61,6 +61,7 @@ done`
 if [ -n "${diff_corp[*]}" ]; then
   mailbody=`echo -n "$mailbody" | nkf -MB` #文字コードをJISに変換してからbase64エンコード
   echo "$mailhead$mailbody" | /usr/lib/sendmail -f $MAIL_FROM -i -t
+  echo "無線LAN設定の相違を検出、詳細をメール送信完了"
 else
   echo "該当レコード無し"
 fi
