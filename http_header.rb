@@ -1,9 +1,8 @@
-#!/bin/ruby
 #
 # HTTPヘッダ記録スクリプト
 #
 # history
-# 2017.06.29 Yano_Yuki10071197
+# 2017.06.30 Yano_Yuki10071197
 #   first release
 #
 ini = <<"EOS"
@@ -13,9 +12,11 @@ ini = <<"EOS"
 ; ===================================================================================
 [system]
 ; log_write : ログ記録するかどうか（0:記録せず標準出力 / 1:記録する）
-; timeout : レスポンスのないヘッダデータをメモリへ保持する秒数（設定秒数経過後に破棄）
-log_write = 1
+; timeout   : レスポンスのないヘッダデータをメモリへ保持する秒数（設定秒数経過後に破棄）
+; lockfile  : 二重起動防止に使うロックファイル名とパス
+log_write = 0
 timeout = 300
+lockfile = /tmp/lockfile
 
 [log]
 ;; HTTPヘッダを記録するログファイル
@@ -36,14 +37,12 @@ get_status = ALL
 [command]
 ;; シェルのコマンド詳細設定
 ; tcpdump : tcpdumpコマンドとオプション（コマンドパスは絶対指定）
-tcpdump = /sbin/tcpdump -i eth1 port 80 -Anns 2000 -l 2>&1
+tcpdump = /sbin/tcpdump -i venet0:0 port 80 -Anns 2000 -l 2>&1
 ; ===================================================================================
 
 EOS
 
-
 require "open3"
-
 
 # 設定読み込みクラス
 class LoadIni < Hash
@@ -59,7 +58,7 @@ class LoadIni < Hash
         self[sectionName, $1.strip] = $2.strip if sectionName != ""
       end
     end
-  end #def initialize
+  end
 
   # [name]
   # hoge = val
@@ -68,7 +67,7 @@ class LoadIni < Hash
     return super(section) if rest.length == 0
     key=rest[0]
     self[section] ? self[section][key] : nil
-  end # def [](section, *rest)
+  end
 
   def []=(section, *rest)
     if rest.length == 1
@@ -80,7 +79,7 @@ class LoadIni < Hash
     else
       raise "invalid number of param"
     end
-  end #def []=(section, *rest)
+  end
 end # class LoadIni
 
 
@@ -103,19 +102,92 @@ end # class LogOutput
 
 
 
+# 二重起動防止クラス
+class LockFile
+  def self.file_check(lockfile)
+    # ファイルチェック
+    if File.exist?(lockfile)
+      # pidのチェック
+      pid = 0
+      File.open(lockfile, "r") do |f|
+        pid = f.read.chomp!.to_i
+      end
+      if exist_process(pid)
+        puts "既に起動中のヤツがいるです"
+        exit 1
+      else
+        puts "プロセス途中で死んでファイル残ったままっぽいっす"
+        exit 1
+      end
+    else
+      # なければLOCKファイル作成
+      File.open(lockfile, "w") do |f|
+        # LOCK_NBのフラグもつける。もしぶつかったとしてもすぐにやめさせる
+        locked = f.flock(File::LOCK_EX | File::LOCK_NB)
+        if locked
+          f.puts $$
+        else
+          puts "lock failed -> pid: #{$$}"
+        end
+      end
+    end
+  end # file_check
+
+  # プロセスの生き死に確認
+  def self.exist_process(pid)
+    begin
+      gid = Process.getpgid(pid)
+      return true
+    rescue => e
+      puts e
+      return false
+    end
+  end # exist_process
+end # class LockFile
+
+
+
+# 標準出力のバッファリングを無効化
+STDOUT.sync = true
+
+# 実行ユーザチェック
+unless ENV['USER'] == "root"
+  puts "Error: This script must be run as the \"root\" user."
+  exit 1
+end
+
 # 設定読み込み
 ini = LoadIni.new(ini)
 timeout = ini["system", "timeout"]
+lockfile = ini["system", "lockfile"]
 
 # HTTPステータスコードチェック
 get_status = ini["http", "get_status"].gsub(/,/, "|")
 unless get_status =~ /^(?:ALL|\d{3}(?:\|\d{3})*)$/
-  puts "取得するHTTPステータスコード設定の書式エラー"
-  exit(2)
+  puts "Error: Format error of HTTP status code setting."
+  exit 1
 end
 
-# 標準出力のバッファリングを無効化
-STDOUT.sync = true
+# 二重起動防止
+LockFile.file_check(lockfile)
+# Ctrl-C が押された場合の処理
+Signal.trap(:INT) do
+  File.delete(lockfile)
+  puts "Signal :INT"
+  exit 1
+end
+# kill -9 された場合の処理
+Signal.trap(:KILL) do
+  File.delete(lockfile)
+  puts "Signal :KILL"
+  exit 1
+end
+# kill された場合の処理
+Signal.trap(:TERM) do
+  File.delete(lockfile)
+  puts "Signal :TERM"
+  exit 1
+end
 
 
 
@@ -170,6 +242,7 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
           while i < request.count
             tmp = []
             response.each { |v| tmp.push(v.values_at(:ack)).flatten! }
+
             # リクエストのシーケンス番号でレスポンスのackを検索して、最初にマッチした添字で紐付ける
             if response_index = tmp.index(request[i][:seq])
               # リクエストヘッダとレスポンスヘッダをペアで出力
@@ -178,7 +251,6 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
               elsif response[response_index][:status] =~ /#{get_status}/o
                 puts request[i][:header], response[response_index][:header], "\n"
               end
-
               # 出力した要素は配列から削除
               request.delete_at(i)
               response.delete_at(response_index)
@@ -225,13 +297,17 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
       break if stdout.eof? && stderr.eof?
     end # loop
 
-    puts "EOF検知で終了"
+    puts "Error: Since EOF was detected, the script is terminated."
 
     # ログ記録終了
     LogOutput.stop if ini["system", "log_write"] == "1"
 
+    File.delete(lockfile)
+    exit 1
+
   # エラー処理
   rescue => e
+    File.delete(lockfile)
     puts e.class
     puts e.message
     puts e.backtrace
