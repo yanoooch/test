@@ -1,3 +1,4 @@
+#!/bin/ruby
 #
 # HTTPヘッダ記録スクリプト
 #
@@ -127,6 +128,7 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
     # ログ記録開始
     if ini["system", "log_write"] == "1"
       LogOutput.start(ini["log", "log_dir"], ini["log", "file_prefix"], ini["log", "file_suffix"])
+      log_day = Time.now.day
     end
 
     http_header = ""
@@ -176,6 +178,7 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
               elsif response[response_index][:status] =~ /#{get_status}/o
                 puts request[i][:header], response[response_index][:header], "\n"
               end
+
               # 出力した要素は配列から削除
               request.delete_at(i)
               response.delete_at(response_index)
@@ -205,6 +208,15 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
 
         # ループ前にhttp_headerのゴミ掃除（最後のキャプチャブロックのみ残す）
         http_header = $1 if http_header =~ /\A.*\n(\d\d:\d\d:\d\d\.\d{6}.*?)\z/m
+
+        # 日付が変わったらログファイルを変更する
+        if ini["system", "log_write"] == "1"
+          unless Time.now.day == log_day
+            LogOutput.stop
+            LogOutput.start(ini["log", "log_dir"], ini["log", "file_prefix"], ini["log", "file_suffix"])
+            log_day = Time.now.day
+          end
+        end
 
         end # io.each
       end # IO.select([stdout, stderr]).flatten.compact.each
