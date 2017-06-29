@@ -1,6 +1,9 @@
 #
 # HTTPヘッダ記録スクリプト
-# written by Yano_Yuki10071197 2017.06.29
+#
+# history
+# 2017.06.29 Yano_Yuki10071197
+#   first release
 #
 ini = <<"EOS"
 
@@ -16,35 +19,34 @@ timeout = 300
 [log]
 ;; HTTPヘッダを記録するログファイル
 ; log_dir     : ログファイルの出力先ディレクトリ（絶対パス）
-; file_prefix : ログファイル名の先頭
-; file_suffix : ログファイル名の末尾の表示形式
+; file_prefix : ログファイル名
+; file_suffix : ログファイル名の末尾の日付フォーマット
 log_dir = /var/log/httpd/
 file_prefix = http_header_log
 file_suffix = %Y-%m-%d
 
-[status]
+[http]
 ;; ログに記録するヘッダのHTTPステータスコード
 ; get_status : ALLで全てのHTTPヘッダを記録する。
 ;              任意のステータスコードを入力すると、該当ステータスのみ記録する。
-;              （カンマ区切りで複数のステータス入力可）
+;              （カンマ区切りで複数のステータス入力可。例: 200,400,404）
 get_status = ALL
 
 [command]
 ;; シェルのコマンド詳細設定
 ; tcpdump : tcpdumpコマンドとオプション（コマンドパスは絶対指定）
-tcpdump = /sbin/tcpdump -i venet0:0 port 80 -Anns 2000 -l 2>&1
+tcpdump = /sbin/tcpdump -i eth1 port 80 -Anns 2000 -l 2>&1
 ; ===================================================================================
 
 EOS
+
 
 require "open3"
 
 
 # 設定読み込みクラス
-# [name]
-# hoge = val
-# の値は、インスタンス名 ["name", "hoge"] の書式で参照できる
 class LoadIni < Hash
+  # 初期化時に設定文字列を引数で与える
   def initialize(ini)
     iniarr = ini.split("\n")
     sectionName = ""
@@ -53,41 +55,41 @@ class LoadIni < Hash
       elsif line =~ /\[(.*)\]/
         sectionName = $1.strip
       elsif line =~ /(.*?)=(.*)/
-        self[ sectionName,  $1.strip] = $2.strip if sectionName != ""
+        self[sectionName, $1.strip] = $2.strip if sectionName != ""
       end
     end
   end #def initialize
 
-  def []( section, *rest)
+  # [name]
+  # hoge = val
+  # の val を、インスタンス名["name", "hoge"] の書式で参照
+  def [](section, *rest)
     return super(section) if rest.length == 0
     key=rest[0]
-    self[section] ? self[section][key]  : nil
-  end # def []( section, *rest)
+    self[section] ? self[section][key] : nil
+  end # def [](section, *rest)
 
-  def []=( section, *rest )
+  def []=(section, *rest)
     if rest.length == 1
       hash = rest[0]
-      return super( section, hash)
+      return super(section, hash)
     elsif rest.length == 2
       key, val = rest[0], rest[1]
-      return (self[section] || super(section, Hash.new))[ key ]= val
+      return (self[section] || super(section, Hash.new))[key]= val
     else
       raise "invalid number of param"
     end
-  end #def []=( section, *rest )
-end # class LoadIniFile
+  end #def []=(section, *rest)
+end # class LoadIni
 
 
 
 # ログ記録用クラス
 class LogOutput
-  # 標準出力を抑制してファイルへ出力スタート
   def self.start(log_dir, file_prefix, file_suffix)
     logname = log_dir + file_prefix + "." + Time.new.strftime(file_suffix)
     file = open(logname, 'a')
-    # ファイル書き込みのバッファリングを無効化
     file.sync = true
-    # 標準出力をファイル出力へ切り替え
     $stdout = file
   end
 
@@ -99,11 +101,21 @@ class LogOutput
 end # class LogOutput
 
 
-# 標準出力のバッファリングを無効化
-STDOUT.sync = true
 
 # 設定読み込み
 ini = LoadIni.new(ini)
+timeout = ini["system", "timeout"]
+
+# HTTPステータスコードチェック
+get_status = ini["http", "get_status"].gsub(/,/, "|")
+unless get_status =~ /^(?:ALL|\d{3}(?:\|\d{3})*)$/
+  puts "取得するHTTPステータスコード設定の書式エラー"
+  exit(2)
+end
+
+# 標準出力のバッファリングを無効化
+STDOUT.sync = true
+
 
 
 # tcpdumpを実行して標準出力へ渡す
@@ -113,7 +125,9 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
 
   begin
     # ログ記録開始
-    LogOutput.start(ini["log", "log_dir"], ini["log", "file_prefix"], ini["log", "file_suffix"])
+    if ini["system", "log_write"] == "1"
+      LogOutput.start(ini["log", "log_dir"], ini["log", "file_prefix"], ini["log", "file_suffix"])
+    end
 
     http_header = ""
     request = []
@@ -126,10 +140,8 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
         http_header << line
 
         # リクエストヘッダ処理
-        # 配列の中に {:seq 数値, :header "リクエストヘッダ全体文字列"} のハッシュを格納する
         while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?((?:GET|POST) .*?\r\n)\r\n/m
           hash = {seq: $1, header: $1 + $2, time: Time.now}
-          # TCPヘッダ1行目のシーケンス番号をハッシュキーとして上書き
           hash[:seq] = $1.to_i if hash[:seq] =~ /seq \d+:(\d+)/
           # キャプチャ元から配列に入れた部分は削除して上書き
           http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?(?:GET|POST) .*?\r\n\r\n(.*)\z/m
@@ -138,11 +150,9 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
         end
 
         # レスポンスヘッダ処理
-        # 配列の中に {:ack 数値, :header "レスポンスヘッダ全体文字列"} のハッシュを格納する
         while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?(HTTP\/[12](?:\.[01])? (\d{3}) .*?\r\n)\r\n/m
           # ステータスコード status: も格納しておいて、絞り込みに利用できるようにしておく
-          hash = {ack: $1, header: "\n" + $1 + $2, status: $3.to_i, time: Time.now}
-          # TCPヘッダ1行目のackの数値をハッシュキーとして上書き
+          hash = {ack: $1, header: "\n" + $1 + $2, status: $3, time: Time.now}
           hash[:ack] = $1.to_i if hash[:ack] =~ /ack (\d+)/
           # レスポンスは行頭に"> "付きで記録する
           hash[:header].gsub!(/^/, "> ")
@@ -161,19 +171,37 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
             # リクエストのシーケンス番号でレスポンスのackを検索して、最初にマッチした添字で紐付ける
             if response_index = tmp.index(request[i][:seq])
               # リクエストヘッダとレスポンスヘッダをペアで出力
-              puts request[i][:header], response[response_index][:header], "\n"
-              # 出力した場合は配列から削除
+              if get_status == "ALL"
+                puts request[i][:header], response[response_index][:header], "\n"
+              elsif response[response_index][:status] =~ /#{get_status}/o
+                puts request[i][:header], response[response_index][:header], "\n"
+              end
+              # 出力した要素は配列から削除
               request.delete_at(i)
               response.delete_at(response_index)
-              next # 配列から削除した場合は i へ加算せずにループ継続
+              next # 削除した場合は i へ加算せずにループ継続
             end
             i += 1
           end
         end
 
-        # 格納してから300秒以上経った要素は削除
-        request.delete_if { |v| v[:time] < Time.now - 300 }
-        response.delete_if { |v| v[:time] < Time.now - 300 }
+        # 格納してから設定のタイムアウト値が経過した要素は、単独で出力してから削除
+        request.delete_if do |v|
+          if v[:time] < Time.now - timeout.to_i
+            puts "timeout\n", v[:header], "\n"
+            true
+          else
+            false
+          end
+        end
+        response.delete_if do |v|
+          if v[:time] < Time.now - timeout.to_i
+            puts "timeout\n", v[:header], "\n"
+            true
+          else
+            false
+          end
+        end
 
         # ループ前にhttp_headerのゴミ掃除（最後のキャプチャブロックのみ残す）
         http_header = $1 if http_header =~ /\A.*\n(\d\d:\d\d:\d\d\.\d{6}.*?)\z/m
@@ -181,14 +209,14 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
         end # io.each
       end # IO.select([stdout, stderr]).flatten.compact.each
 
-      # 標準出力、標準エラーでEOFが検知された、つまり外部コマンドの実行が終了したらループを抜ける
+      # EOFが検知された、つまり外部コマンドの実行が終了したらループを抜ける
       break if stdout.eof? && stderr.eof?
     end # loop
 
-    puts "EOF検知でループ終了"
+    puts "EOF検知で終了"
 
     # ログ記録終了
-    LogOutput.stop
+    LogOutput.stop if ini["system", "log_write"] == "1"
 
   # エラー処理
   rescue => e
