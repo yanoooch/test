@@ -8,16 +8,16 @@
 #
 
 ini = <<"EOS"
-; ===================================================================================
+; ==============================================================================
 ; 設定
-; ===================================================================================
+; ==============================================================================
 [system]
 ; log_write : ログ記録するかどうか（0:記録せず標準出力 / 1:記録する）
 ; timeout   : レスポンスのないヘッダデータをメモリへ保持する秒数（設定秒数経過後に破棄）
-; lockfile  : 二重起動防止に使うロックファイルのパス
+; lockfile  : 二重起動防止に使うロックファイル名とパス
 log_write = 1
 timeout = 300
-lockfile = /tmp/lockfile
+lockfile = /tmp/http_header.rb.lock
 
 [log]
 ;; HTTPヘッダを記録するログファイル
@@ -31,15 +31,15 @@ file_suffix = %Y-%m-%d
 [http]
 ;; ログに記録するヘッダのHTTPステータスコード
 ; get_status : ALLで全てのHTTPヘッダを記録する。
-;              任意のステータスコードを入力すると、該当ステータスのみ記録する。
-;              （カンマ区切りで複数のステータス入力可。例: 200,400,404）
+;              任意のステータスコードを入力すると、該当コードのヘッダのみ記録す る。
+;              （カンマ区切りで複数のステータスコード入力可。例: 200,400,404）
 get_status = ALL
 
 [command]
 ;; シェルのコマンド詳細設定
 ; tcpdump : tcpdumpコマンドとオプション（コマンドパスは絶対指定）
 tcpdump = /sbin/tcpdump -i eth1 port 80 -Anns 2000 -l 2>&1
-; ===================================================================================
+; ==============================================================================
 EOS
 
 require "open3"
@@ -77,7 +77,7 @@ class LoadIni < Hash
       key, val = rest[0], rest[1]
       return (self[section] || super(section, Hash.new))[key]= val
     else
-      raise "invalid number of param"
+      raise "Error: invalid number of param"
     end
   end
 end # class LoadIni
@@ -87,7 +87,8 @@ end # class LoadIni
 # ログ記録用クラス
 class LogOutput
   def self.start(log_dir, file_prefix, file_suffix)
-    logname = log_dir + file_prefix + "." + Time.new.strftime(file_suffix)
+    log_dir.gsub!(/\/$/, "")
+    logname = log_dir + "/" + file_prefix + "." + Time.new.strftime(file_suffix)
     file = open(logname, 'a')
     file.sync = true
     $stdout = file
@@ -109,17 +110,17 @@ class LockFile
     st = File.open(lockfile, 'a')
     if ! st
       STDERR.print("Error: failed to open #{lockfile}\n")
-      return nil
+      exit 1
     end
 
     begin
-      res = st.flock(File::LOCK_EX|File::LOCK_NB)
-      return st if res
+      locked = st.flock(File::LOCK_EX|File::LOCK_NB)
+      return st if locked
       STDERR.print("Error: process already started\n")
       exit 1
     rescue
       STDERR.print("Error: failed to lock #{lockfile}\n")
-      return nil
+      exit 1
     end
 
     return nil
@@ -131,7 +132,7 @@ class LockFile
       st.flock(File::LOCK_UN)
       st.close
     rescue
-      STDERR.print("Error: failed to unlock #{lockfile}")
+      STDERR.print("Error: failed to unlock lockfile")
       return false
     end
 
@@ -155,7 +156,7 @@ ini = LoadIni.new(ini)
 timeout = ini["system", "timeout"]
 lockfile = ini["system", "lockfile"]
 
-# HTTPステータスコードチェック
+# HTTPステータスコード設定チェック
 get_status = ini["http", "get_status"].gsub(/,/, "|")
 unless get_status =~ /^(?:ALL|\d{3}(?:\|\d{3})*)$/
   puts "Error: Format error of HTTP status code setting."
@@ -164,12 +165,12 @@ end
 
 # 二重起動防止
 lock_st = LockFile.lock(lockfile)
-# Ctrl-C が押された場合の処理
+# Ctrl-C が押された場合(kill -2)の処理
 Signal.trap(:INT) do
   LockFile.unlock(lock_st)
   exit 1
 end
-## kill された場合の処理
+## killされた場合(kill -15)の処理
 Signal.trap(:TERM) do
   LockFile.unlock(lock_st)
   exit 1
