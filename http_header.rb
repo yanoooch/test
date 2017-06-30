@@ -1,3 +1,4 @@
+#!/bin/ruby
 #
 # HTTPヘッダ記録スクリプト
 #
@@ -5,16 +6,16 @@
 # 2017.06.30 Yano_Yuki10071197
 #   first release
 #
-ini = <<"EOS"
 
+ini = <<"EOS"
 ; ===================================================================================
 ; 設定
 ; ===================================================================================
 [system]
 ; log_write : ログ記録するかどうか（0:記録せず標準出力 / 1:記録する）
 ; timeout   : レスポンスのないヘッダデータをメモリへ保持する秒数（設定秒数経過後に破棄）
-; lockfile  : 二重起動防止に使うロックファイル名とパス
-log_write = 0
+; lockfile  : 二重起動防止に使うロックファイルのパス
+log_write = 1
 timeout = 300
 lockfile = /tmp/lockfile
 
@@ -37,9 +38,8 @@ get_status = ALL
 [command]
 ;; シェルのコマンド詳細設定
 ; tcpdump : tcpdumpコマンドとオプション（コマンドパスは絶対指定）
-tcpdump = /sbin/tcpdump -i venet0:0 port 80 -Anns 2000 -l 2>&1
+tcpdump = /sbin/tcpdump -i eth1 port 80 -Anns 2000 -l 2>&1
 ; ===================================================================================
-
 EOS
 
 require "open3"
@@ -55,7 +55,7 @@ class LoadIni < Hash
       elsif line =~ /\[(.*)\]/
         sectionName = $1.strip
       elsif line =~ /(.*?)=(.*)/
-        self[sectionName, $1.strip] = $2.strip if sectionName != ""
+        self[sectionName, $1.strip] = $2.strip unless sectionName == ""
       end
     end
   end
@@ -104,45 +104,39 @@ end # class LogOutput
 
 # 二重起動防止クラス
 class LockFile
-  def self.file_check(lockfile)
-    # ファイルチェック
-    if File.exist?(lockfile)
-      # pidのチェック
-      pid = 0
-      File.open(lockfile, "r") do |f|
-        pid = f.read.chomp!.to_i
-      end
-      if exist_process(pid)
-        puts "既に起動中のヤツがいるです"
-        exit 1
-      else
-        puts "プロセス途中で死んでファイル残ったままっぽいっす"
-        exit 1
-      end
-    else
-      # なければLOCKファイル作成
-      File.open(lockfile, "w") do |f|
-        # LOCK_NBのフラグもつける。もしぶつかったとしてもすぐにやめさせる
-        locked = f.flock(File::LOCK_EX | File::LOCK_NB)
-        if locked
-          f.puts $$
-        else
-          puts "lock failed -> pid: #{$$}"
-        end
-      end
+  # ロック
+  def self.lock(lockfile)
+    st = File.open(lockfile, 'a')
+    if ! st
+      STDERR.print("Error: failed to open #{lockfile}\n")
+      return nil
     end
-  end # file_check
 
-  # プロセスの生き死に確認
-  def self.exist_process(pid)
     begin
-      gid = Process.getpgid(pid)
-      return true
-    rescue => e
-      puts e
+      res = st.flock(File::LOCK_EX|File::LOCK_NB)
+      return st if res
+      STDERR.print("Error: process already started\n")
+      exit 1
+    rescue
+      STDERR.print("Error: failed to lock #{lockfile}\n")
+      return nil
+    end
+
+    return nil
+  end
+
+  # ロック解除
+  def self.unlock(st)
+    begin
+      st.flock(File::LOCK_UN)
+      st.close
+    rescue
+      STDERR.print("Error: failed to unlock #{lockfile}")
       return false
     end
-  end # exist_process
+
+    return true
+  end
 end # class LockFile
 
 
@@ -169,23 +163,15 @@ unless get_status =~ /^(?:ALL|\d{3}(?:\|\d{3})*)$/
 end
 
 # 二重起動防止
-LockFile.file_check(lockfile)
+lock_st = LockFile.lock(lockfile)
 # Ctrl-C が押された場合の処理
 Signal.trap(:INT) do
-  File.delete(lockfile)
-  puts "Signal :INT"
+  LockFile.unlock(lock_st)
   exit 1
 end
-# kill -9 された場合の処理
-Signal.trap(:KILL) do
-  File.delete(lockfile)
-  puts "Signal :KILL"
-  exit 1
-end
-# kill された場合の処理
+## kill された場合の処理
 Signal.trap(:TERM) do
-  File.delete(lockfile)
-  puts "Signal :TERM"
+  LockFile.unlock(lock_st)
   exit 1
 end
 
@@ -302,12 +288,12 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
     # ログ記録終了
     LogOutput.stop if ini["system", "log_write"] == "1"
 
-    File.delete(lockfile)
+    LockFile.unlock(lock_st)
     exit 1
 
   # エラー処理
   rescue => e
-    File.delete(lockfile)
+    LockFile.unlock(lock_st)
     puts e.class
     puts e.message
     puts e.backtrace
