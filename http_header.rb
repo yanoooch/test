@@ -13,7 +13,7 @@ ini = <<"EOS"
 ; ==============================================================================
 [system]
 ; log_write : ログ記録するかどうか（0:記録せず標準出力 / 1:記録する）
-; timeout   : レスポンスのないヘッダデータをメモリへ保持する秒数（設定秒数経過後に破棄）
+; timeout   : レスポンスのないヘッダデータをメモリへ保持する秒数（設定秒数経過後に単独で出力）
 ; lockfile  : 二重起動防止に使うロックファイル名とパス
 log_write = 1
 timeout = 300
@@ -292,7 +292,6 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
     LockFile.unlock(lock_st)
     exit 1
 
-  # エラー処理
   rescue => e
     LockFile.unlock(lock_st)
     puts e.class
