@@ -116,7 +116,7 @@ class LockFile
     begin
       locked = st.flock(File::LOCK_EX|File::LOCK_NB)
       return st if locked
-      STDERR.print("Error: process already started\n")
+      STDERR.print("Error: process already running!\n")
       exit 1
     rescue
       STDERR.print("Error: failed to lock #{lockfile}\n")
