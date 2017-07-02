@@ -3,7 +3,7 @@
 # HTTPヘッダ記録スクリプト
 #
 # history
-# 2017.06.30 Yano_Yuki10071197
+# 2017.07.03 Yano_Yuki10071197
 #   first release
 #
 
@@ -38,46 +38,52 @@ get_status = ALL
 [command]
 ;; シェルのコマンド詳細設定
 ; tcpdump : tcpdumpコマンドとオプション（コマンドパスは絶対指定）
-tcpdump = /sbin/tcpdump -i eth1 port 80 -A -nn -p -s 2000 -l 2>&1
+tcpdump = /sbin/tcpdump -i venet0:0 port 80 -A -nn -p -s 2000 -l 2>&1
 ; ==============================================================================
 EOS
 
 require "open3"
+
+
+
+## クラス定義 ##
 
 # 設定読み込みクラス
 class LoadIni < Hash
   # 初期化時に設定文字列を引数で与える
   def initialize(ini)
     iniarr = ini.split("\n")
-    sectionName = ""
+    section_name = ""
     iniarr.each do |line|
-      if line =~ /^#/
-      elsif line =~ /\[(.*)\]/
-        sectionName = $1.strip
-      elsif line =~ /(.*?)=(.*)/
-        self[sectionName, $1.strip] = $2.strip unless sectionName == ""
+      case line
+      when /^[#;]/
+      when /^\[(.*)\]/
+        section_name = $1.strip
+      when /(.*?)=(.*)/
+        self[section_name, $1.strip] = $2.strip unless section_name == ""
       end
     end
   end
 
   # [name]
   # hoge = val
-  # の val を、インスタンス名["name", "hoge"] の書式で参照
+  # の val を、インスタンス名["name", "hoge"] の書式で参照させる
   def [](section, *rest)
     return super(section) if rest.length == 0
-    key=rest[0]
+    key = rest[0]
     self[section] ? self[section][key] : nil
   end
 
   def []=(section, *rest)
-    if rest.length == 1
+    case rest.length
+    when 1
       hash = rest[0]
       return super(section, hash)
-    elsif rest.length == 2
+    when 2
       key, val = rest[0], rest[1]
-      return (self[section] || super(section, Hash.new))[key]= val
+      return (self[section] || super(section, Hash.new))[key] = val
     else
-      raise "Error: invalid number of param"
+      STDERR.print("Error: invalid number of param\n")
     end
   end
 end # class LoadIni
@@ -90,7 +96,11 @@ class LogOutput
   def self.start(log_dir, file_prefix, file_suffix)
     log_dir.gsub!(/\/$/, "")
     logname = log_dir + "/" + file_prefix + "." + Time.new.strftime(file_suffix)
-    file = open(logname, 'a')
+    file = File.open(logname, 'a')
+    if ! file
+      STDERR.print("Error: failed to open #{logname}\n")
+      exit 1
+    end
     file.sync = true
     $stdout = file
   end
@@ -143,12 +153,14 @@ end # class LockFile
 
 
 
+## メイン処理 ##
+
 # 標準出力のバッファリングを無効化
 STDOUT.sync = true
 
 # 実行ユーザチェック
 unless ENV['USER'] == "root"
-  puts "Error: This script must be run as the \"root\" user."
+  STDERR.print("Error: This script must be run as the \"root\" user.\n")
   exit 1
 end
 
@@ -157,28 +169,25 @@ ini = LoadIni.new(ini)
 timeout = ini["system", "timeout"]
 lockfile = ini["system", "lockfile"]
 
-# HTTPステータスコード設定チェック
-get_status = ini["http", "get_status"].gsub(/,/, "|")
-unless get_status =~ /^(?:ALL|\d{3}(?:\|\d{3})*)$/
-  puts "Error: Format error of HTTP status code setting."
-  exit 1
-end
-
 # 二重起動防止
 lock_st = LockFile.lock(lockfile)
 
-# Ctrl+C が押された場合(kill -2)
+# HTTPステータスコード設定チェック
+get_status = ini["http", "get_status"].gsub(/,/, "|")
+unless get_status =~ /^(?:ALL|\d{3}(?:\|\d{3})*)$/
+  STDERR.print("Error: Format error of HTTP status code setting.\n")
+  exit 1
+end
+
+# シグナルハンドラ
 Signal.trap(:INT) do
   LockFile.unlock(lock_st)
   exit 1
 end
-# killされた場合(kill -15)
 Signal.trap(:TERM) do
   LockFile.unlock(lock_st)
   exit 1
 end
-
-
 
 # tcpdumpを実行して標準出力へ渡す
 Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
@@ -192,7 +201,7 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
       log_day = Time.now.day
     end
 
-    http_header = ""
+    capture_data = ""
     request = []
     response = []
 
@@ -201,27 +210,27 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
       IO.select([stdout, stderr]).flatten.compact.each do |io|
         io.each do |line|
           next if line.nil? || line.empty?
-          http_header << line
+          capture_data << line
 
           # リクエストヘッダ処理
-          while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?((?:GET|POST) .*?\r\n)\r\n/m
+          while capture_data =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?((?:GET|POST) .*?\r\n)\r\n/m
             hash = {seq: $1, header: $1 + $2, time: Time.now}
             hash[:seq] = $1.to_i if hash[:seq] =~ /seq \d+:(\d+)/
-            # キャプチャ元から配列に入れた部分は削除して上書き
-            http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?(?:GET|POST) .*?\r\n\r\n(.*)\z/m
+            # キャプチャデータから配列に入れた部分は削除して上書き
+            capture_data = $1 + $2 if capture_data =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?(?:GET|POST) .*?\r\n\r\n(.*)\z/m
             request.push(hash) unless hash.empty?
             hash = {}
           end
 
           # レスポンスヘッダ処理
-          while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?(HTTP\/[12](?:\.[01])? (\d{3}) .*?\r\n)\r\n/m
-            # ステータスコード status: も格納しておいて、絞り込みに利用できるようにしておく
+          while capture_data =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?(HTTP\/[12](?:\.[01])? (\d{3}) .*?\r\n)\r\n/m
+            # ステータスコードも格納しておいて、絞り込みに利用できるようにしておく
             hash = {ack: $1, header: "\n" + $1 + $2, status: $3, time: Time.now}
             hash[:ack] = $1.to_i if hash[:ack] =~ /ack (\d+)/
-            # レスポンスは行頭に"> "付きで記録する
+            # レスポンスは行頭に "> " 付きで出力する
             hash[:header].gsub!(/^/, "> ")
-            # キャプチャ元から配列に入れた部分は削除して上書き
-            http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?HTTP\/[12](?:\.[01])? \d{3} .*?\r\n\r\n(.*)\z/m
+            # キャプチャデータから配列に入れた部分は削除して上書き
+            capture_data = $1 + $2 if capture_data =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?HTTP\/[12](?:\.[01])? \d{3} .*?\r\n\r\n(.*)\z/m
             response.push(hash) unless hash.empty?
             hash = {}
           end
@@ -268,8 +277,8 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
             end
           end
 
-          # ループ前にtcpdumpのゴミ掃除（最後のキャプチャブロックのみ残す）
-          http_header = $1 if http_header =~ /\A.*\n(\d\d:\d\d:\d\d\.\d{6}.*?)\z/m
+          # ループ前にキャプチャデータのゴミ掃除（最後のキャプチャブロックのみ残す）
+          capture_data = $1 if capture_data =~ /\A.*\n(\d\d:\d\d:\d\d\.\d{6}.*?)\z/m
 
           # 日付が変わったらログファイルを変更する
           if ini["system", "log_write"] == "1"
