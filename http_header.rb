@@ -38,7 +38,7 @@ get_status = ALL
 [command]
 ;; シェルのコマンド詳細設定
 ; tcpdump : tcpdumpコマンドとオプション（コマンドパスは絶対指定）
-tcpdump = /sbin/tcpdump -i eth1 port 80 -Anns 2000 -l 2>&1
+tcpdump = /sbin/tcpdump -i eth1 port 80 -A -nn -p -s 2000 -l 2>&1
 ; ==============================================================================
 EOS
 
@@ -86,6 +86,7 @@ end # class LoadIni
 
 # ログ記録用クラス
 class LogOutput
+  # 標準出力をファイルへの出力へ切り替える
   def self.start(log_dir, file_prefix, file_suffix)
     log_dir.gsub!(/\/$/, "")
     logname = log_dir + "/" + file_prefix + "." + Time.new.strftime(file_suffix)
@@ -105,7 +106,7 @@ end # class LogOutput
 
 # 二重起動防止クラス
 class LockFile
-  # ロック
+  # ロックファイルを排他ロックして二重起動を防止する
   def self.lock(lockfile)
     st = File.open(lockfile, 'a')
     if ! st
@@ -165,12 +166,13 @@ end
 
 # 二重起動防止
 lock_st = LockFile.lock(lockfile)
-# Ctrl-C が押された場合(kill -2)の処理
+
+# Ctrl+C が押された場合(kill -2)
 Signal.trap(:INT) do
   LockFile.unlock(lock_st)
   exit 1
 end
-## killされた場合(kill -15)の処理
+# killされた場合(kill -15)
 Signal.trap(:TERM) do
   LockFile.unlock(lock_st)
   exit 1
@@ -195,87 +197,88 @@ Open3.popen3(ini["command", "tcpdump"]) do |stdin, stdout, stderr, wait_thr|
     response = []
 
     # 標準出力、標準エラーの出力があるまで延々と待ち、随時1行ずつ書き出す
-    loop do IO.select([stdout, stderr]).flatten.compact.each do |io|
-      io.each do |line|
-        next if line.nil? || line.empty?
-        http_header << line
+    loop do
+      IO.select([stdout, stderr]).flatten.compact.each do |io|
+        io.each do |line|
+          next if line.nil? || line.empty?
+          http_header << line
 
-        # リクエストヘッダ処理
-        while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?((?:GET|POST) .*?\r\n)\r\n/m
-          hash = {seq: $1, header: $1 + $2, time: Time.now}
-          hash[:seq] = $1.to_i if hash[:seq] =~ /seq \d+:(\d+)/
-          # キャプチャ元から配列に入れた部分は削除して上書き
-          http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?(?:GET|POST) .*?\r\n\r\n(.*)\z/m
-          request.push(hash) unless hash.empty?
-          hash = {}
-        end
+          # リクエストヘッダ処理
+          while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?((?:GET|POST) .*?\r\n)\r\n/m
+            hash = {seq: $1, header: $1 + $2, time: Time.now}
+            hash[:seq] = $1.to_i if hash[:seq] =~ /seq \d+:(\d+)/
+            # キャプチャ元から配列に入れた部分は削除して上書き
+            http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?(?:GET|POST) .*?\r\n\r\n(.*)\z/m
+            request.push(hash) unless hash.empty?
+            hash = {}
+          end
 
-        # レスポンスヘッダ処理
-        while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?(HTTP\/[12](?:\.[01])? (\d{3}) .*?\r\n)\r\n/m
-          # ステータスコード status: も格納しておいて、絞り込みに利用できるようにしておく
-          hash = {ack: $1, header: "\n" + $1 + $2, status: $3, time: Time.now}
-          hash[:ack] = $1.to_i if hash[:ack] =~ /ack (\d+)/
-          # レスポンスは行頭に"> "付きで記録する
-          hash[:header].gsub!(/^/, "> ")
-          # キャプチャ元から配列に入れた部分は削除して上書き
-          http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?HTTP\/[12](?:\.[01])? \d{3} .*?\r\n\r\n(.*)\z/m
-          response.push(hash) unless hash.empty?
-          hash = {}
-        end
+          # レスポンスヘッダ処理
+          while http_header =~ /\A.*?(\d\d:\d\d:\d\d\..*?\n).*?(HTTP\/[12](?:\.[01])? (\d{3}) .*?\r\n)\r\n/m
+            # ステータスコード status: も格納しておいて、絞り込みに利用できるようにしておく
+            hash = {ack: $1, header: "\n" + $1 + $2, status: $3, time: Time.now}
+            hash[:ack] = $1.to_i if hash[:ack] =~ /ack (\d+)/
+            # レスポンスは行頭に"> "付きで記録する
+            hash[:header].gsub!(/^/, "> ")
+            # キャプチャ元から配列に入れた部分は削除して上書き
+            http_header = $1 + $2 if http_header =~ /\A(.*?)\d\d:\d\d:\d\d\..*?\n.*?HTTP\/[12](?:\.[01])? \d{3} .*?\r\n\r\n(.*)\z/m
+            response.push(hash) unless hash.empty?
+            hash = {}
+          end
 
-        # リクエストヘッダ配列、レスポンスヘッダ配列共にデータが入っている場合
-        unless request.empty? && response.empty?
-          i = 0
-          while i < request.count
-            tmp = []
-            response.each { |v| tmp.push(v.values_at(:ack)).flatten! }
+          # リクエストヘッダ配列、レスポンスヘッダ配列共にデータが入っている場合
+          unless request.empty? && response.empty?
+            i = 0
+            while i < request.count
+              tmp = []
+              response.each { |v| tmp.push(v.values_at(:ack)).flatten! }
 
-            # リクエストのシーケンス番号でレスポンスのackを検索して、最初にマッチした添字で紐付ける
-            if response_index = tmp.index(request[i][:seq])
-              # リクエストヘッダとレスポンスヘッダをペアで出力
-              if get_status == "ALL"
-                puts request[i][:header], response[response_index][:header], "\n"
-              elsif response[response_index][:status] =~ /#{get_status}/o
-                puts request[i][:header], response[response_index][:header], "\n"
+              # リクエストのシーケンス番号でレスポンスのackを検索して、最初にマッチした添字で紐付ける
+              if response_index = tmp.index(request[i][:seq])
+                # リクエストヘッダとレスポンスヘッダをペアで出力
+                if get_status == "ALL"
+                  puts request[i][:header], response[response_index][:header], "\n"
+                elsif response[response_index][:status] =~ /#{get_status}/o
+                  puts request[i][:header], response[response_index][:header], "\n"
+                end
+                # 出力した要素は配列から削除
+                request.delete_at(i)
+                response.delete_at(response_index)
+                next # 削除した場合は i へ加算せずにループ継続
               end
-              # 出力した要素は配列から削除
-              request.delete_at(i)
-              response.delete_at(response_index)
-              next # 削除した場合は i へ加算せずにループ継続
+              i += 1
             end
-            i += 1
           end
-        end
 
-        # 格納してから設定のタイムアウト値が経過した要素は、単独で出力してから削除
-        request.delete_if do |v|
-          if v[:time] < Time.now - timeout.to_i
-            puts "timeout\n", v[:header], "\n"
-            true
-          else
-            false
+          # 格納してから設定のタイムアウト値が経過した要素は、単独で出力してから削除
+          request.delete_if do |v|
+            if v[:time] < Time.now - timeout.to_i
+              puts "timeout\n", v[:header], "\n"
+              true
+            else
+              false
+            end
           end
-        end
-        response.delete_if do |v|
-          if v[:time] < Time.now - timeout.to_i
-            puts "timeout\n", v[:header], "\n"
-            true
-          else
-            false
+          response.delete_if do |v|
+            if v[:time] < Time.now - timeout.to_i
+              puts "timeout\n", v[:header], "\n"
+              true
+            else
+              false
+            end
           end
-        end
 
-        # ループ前にhttp_headerのゴミ掃除（最後のキャプチャブロックのみ残す）
-        http_header = $1 if http_header =~ /\A.*\n(\d\d:\d\d:\d\d\.\d{6}.*?)\z/m
+          # ループ前にtcpdumpのゴミ掃除（最後のキャプチャブロックのみ残す）
+          http_header = $1 if http_header =~ /\A.*\n(\d\d:\d\d:\d\d\.\d{6}.*?)\z/m
 
-        # 日付が変わったらログファイルを変更する
-        if ini["system", "log_write"] == "1"
-          unless Time.now.day == log_day
-            LogOutput.stop
-            LogOutput.start(ini["log", "log_dir"], ini["log", "file_prefix"], ini["log", "file_suffix"])
-            log_day = Time.now.day
+          # 日付が変わったらログファイルを変更する
+          if ini["system", "log_write"] == "1"
+            unless Time.now.day == log_day
+              LogOutput.stop
+              LogOutput.start(ini["log", "log_dir"], ini["log", "file_prefix"], ini["log", "file_suffix"])
+              log_day = Time.now.day
+            end
           end
-        end
 
         end # io.each
       end # IO.select([stdout, stderr]).flatten.compact.each
